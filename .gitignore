@@ -1,0 +1,27 @@
+# Node
+node_modules/
+dist/
+dist-electron/
+release/
+*.log
+
+# Python
+sidecar/.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Local app data (never commit user meeting data)
+data/
+*.db
+*.db-journal
+*.sqlite
+recordings/
+models/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

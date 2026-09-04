@@ -1,0 +1,27 @@
+appId: in.devainfotech.meetingscribe
+productName: MeetingScribe
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**
+  - dist-electron/**
+  - package.json
+extraResources:
+  # The Python sidecar ships alongside the app. In a packaged build this is
+  # either the raw source (dev/pip install) or a PyInstaller one-folder build.
+  - from: sidecar
+    to: sidecar
+    filter:
+      - '**/*'
+      - '!**/__pycache__/**'
+      - '!.venv/**'
+win:
+  icon: build/icon.png
+  target:
+    - nsis
+  artifactName: ${productName}-${version}-setup.${ext}
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true

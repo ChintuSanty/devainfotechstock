@@ -1,0 +1,23 @@
+# Local API surface for the Electron front end
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic==2.10.4
+
+# Audio + speech to text.
+# faster-whisper is a CTranslate2 port of Whisper: ~4x faster than the
+# reference implementation and int8-capable, which is what makes on-device
+# transcription practical without a GPU.
+numpy==2.2.1
+faster-whisper==1.1.1
+
+# Audio capture.
+# PyAudioWPatch is PyAudio with WASAPI loopback, the API that lets us record
+# everything Windows plays back without a virtual audio cable.
+PyAudioWPatch==0.2.12.7; sys_platform == 'win32'
+sounddevice==0.5.1; sys_platform != 'win32'
+
+# Meeting app detection (labelling only - capture is app-agnostic)
+psutil==6.1.1
+
+# Per-speaker identification is an optional extra, because it pulls in PyTorch:
+#   pip install -r sidecar/requirements-speakers.txt

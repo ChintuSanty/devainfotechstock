@@ -1,0 +1,11 @@
+# Optional: per-speaker identification in the meeting-audio channel.
+# Pulls in PyTorch (~2 GB). Without it MeetingScribe still records, transcribes
+# and summarises - everyone other than you is just labelled "Participant".
+#
+#   pip install -r sidecar/requirements-speakers.txt
+#
+# speechbrain gives the better separation; resemblyzer is lighter. Installing
+# either is enough.
+speechbrain==1.0.2
+torch==2.5.1
+torchaudio==2.5.1
