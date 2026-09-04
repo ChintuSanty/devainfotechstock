@@ -12,6 +12,11 @@ const api = {
     ipcRenderer.invoke('sidecar:restart'),
 
   openPanel: (tab?: string): Promise<void> => ipcRenderer.invoke('window:open-panel', tab),
+  /** Native folder picker for the storage location. Resolves null if cancelled. */
+  chooseFolder: (current?: string): Promise<string | null> =>
+    ipcRenderer.invoke('dialog:choose-folder', current),
+  /** Reveal a folder in Explorer. Resolves an error string, or null on success. */
+  openPath: (target: string): Promise<string | null> => ipcRenderer.invoke('shell:open-path', target),
   setOverlayExpanded: (expanded: boolean): Promise<void> =>
     ipcRenderer.invoke('overlay:set-expanded', expanded),
   setOverlayInteractive: (interactive: boolean): Promise<void> =>

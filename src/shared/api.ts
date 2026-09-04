@@ -8,6 +8,9 @@ import type {
   MeetingApp,
   RecordingStatus,
   Segment,
+  Speaker,
+  SpeakerHealth,
+  StorageInfo,
   StorageStats,
 } from './types';
 
@@ -75,7 +78,9 @@ export const api = {
   listMeetings: (search = '') =>
     request<{ meetings: Meeting[] }>(`/meetings?search=${encodeURIComponent(search)}`).then((r) => r.meetings),
   getMeeting: (id: string) =>
-    request<{ meeting: Meeting; segments: Segment[]; artifacts: Artifact[] }>(`/meetings/${id}`),
+    request<{ meeting: Meeting; segments: Segment[]; artifacts: Artifact[]; speakers: Speaker[] }>(
+      `/meetings/${id}`,
+    ),
   renameMeeting: (id: string, title: string) =>
     request<Meeting>(`/meetings/${id}`, { method: 'PATCH', body: JSON.stringify({ title }) }),
   summarise: (id: string) => request<{ status: string }>(`/meetings/${id}/summarise`, { method: 'POST' }),
@@ -99,10 +104,30 @@ export const api = {
   resetSettings: () => request<AppSettings>('/settings/reset', { method: 'POST' }),
   devices: () => request<{ loopback: DeviceInfo[]; input: DeviceInfo[] }>('/devices'),
   llmHealth: () => request<LlmHealth>('/llm/health'),
+  speakerHealth: () => request<SpeakerHealth>('/speakers/health'),
+
+  // Speakers
+  listSpeakers: (id: string) => request<{ speakers: Speaker[] }>(`/meetings/${id}/speakers`).then((r) => r.speakers),
+  nameSpeakers: (id: string, names: Record<string, string>) =>
+    request<{ meeting: Meeting; speakers: Speaker[] }>(`/meetings/${id}/speakers`, {
+      method: 'PATCH',
+      body: JSON.stringify({ names }),
+    }),
+  redetectSpeakers: (id: string, threshold?: number) =>
+    request<{ changed: number; speakers: Speaker[] }>(`/meetings/${id}/speakers/redetect`, {
+      method: 'POST',
+      body: JSON.stringify({ threshold: threshold ?? null }),
+    }),
   meetingApps: () => request<{ apps: MeetingApp[] }>('/meeting-apps').then((r) => r.apps),
 
   // Admin / privacy
   stats: () => request<StorageStats>('/admin/stats'),
+  storage: () => request<StorageInfo>('/admin/storage'),
+  setStorage: (path: string, moveExisting: boolean) =>
+    request<{ moved: number; storage_dir: string }>('/admin/storage', {
+      method: 'POST',
+      body: JSON.stringify({ path, move_existing: moveExisting }),
+    }),
   deleteMany: (meetingIds: string[]) =>
     request<{ deleted: number }>('/admin/delete', {
       method: 'POST',

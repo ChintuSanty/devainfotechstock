@@ -18,6 +18,7 @@ import sys
 import threading
 from contextlib import asynccontextmanager
 from datetime import datetime
+from pathlib import Path
 from typing import Any, AsyncIterator
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -32,7 +33,8 @@ from .events import EventBus
 from .export import build_export, format_duration
 from .llm import LLMError, Summarizer, build_client
 from .pipeline import RecordingSession
-from .storage import Database, MeetingRepository
+from .speakers import SpeakerEmbedder, cluster_offline, embedder_status
+from .storage import MeetingStore, SettingsStore
 from .stt import WhisperEngine
 
 logger = logging.getLogger("meetingscribe")
@@ -46,9 +48,9 @@ class AppState:
     def __init__(self, config: AppConfig) -> None:
         config.ensure_dirs()
         self.config = config
-        self.database = Database(config.db_path)
-        self.repository = MeetingRepository(self.database, config.audio_dir)
-        self.settings: Settings = self.repository.load_settings()
+        self.settings_store = SettingsStore(config.settings_path)
+        self.settings: Settings = self.settings_store.load()
+        self.store = MeetingStore(config.resolve_storage_dir(self.settings))
         self.events = EventBus()
         self.engine = WhisperEngine(
             model_size=self.settings.stt_model,
@@ -57,21 +59,22 @@ class AppState:
             language=self.settings.stt_language,
             beam_size=self.settings.stt_beam_size,
         )
-        self.session = RecordingSession(
-            self.repository, self.engine, self.events, config.audio_dir
-        )
+        self.embedder = SpeakerEmbedder(self.settings.speaker_embedding_model)
+        self.session = RecordingSession(self.store, self.engine, self.events, self.embedder)
         self.watcher = MeetingAppWatcher(
             lambda apps: self.events.publish("meeting_apps", {"apps": apps})
         )
         self._summary_jobs: dict[str, threading.Thread] = {}
 
     def apply_settings(self, updated: Settings) -> None:
-        """Reload the Whisper model only when its own settings actually moved."""
+        """Reload models only when the settings they depend on actually moved."""
         stt_changed = (
             updated.stt_model != self.settings.stt_model
             or updated.stt_device != self.settings.stt_device
             or updated.stt_compute_type != self.settings.stt_compute_type
         )
+        embedder_changed = updated.speaker_embedding_model != self.settings.speaker_embedding_model
+        storage_changed = updated.storage_dir != self.settings.storage_dir
         self.settings = updated
         self.engine.model_size = updated.stt_model
         self.engine.device = updated.stt_device
@@ -80,6 +83,21 @@ class AppState:
         self.engine.beam_size = updated.stt_beam_size
         if stt_changed:
             self.engine.unload()
+        if embedder_changed:
+            self.embedder.unload()
+            self.embedder.preferred = updated.speaker_embedding_model
+        if storage_changed and not self.session.is_active:
+            # The path was set directly rather than through /admin/storage, so
+            # just follow it; existing meetings stay where they are.
+            self.store.relocate(self.config.resolve_storage_dir(updated), move_existing=False)
+
+    def change_storage(self, path: str, move_existing: bool) -> dict[str, Any]:
+        if self.session.is_active:
+            raise RuntimeError("Stop the recording before moving the storage folder.")
+        result = self.store.relocate(Path(path).expanduser(), move_existing=move_existing)
+        self.settings = self.settings_store.save({"storage_dir": result["storage_dir"]})
+        self.events.publish("storage_changed", result)
+        return result
 
     def summarise(self, meeting_id: str, force: bool = False) -> None:
         """Run minutes + suggestions off the request thread."""
@@ -93,41 +111,42 @@ class AppState:
         thread.start()
 
     def _summarise_worker(self, meeting_id: str) -> None:
-        meeting = self.repository.get_meeting(meeting_id)
+        meeting = self.store.get_meeting(meeting_id)
         if meeting is None:
             return
-        self.repository.set_status(meeting_id, "summarising")
+        self.store.set_status(meeting_id, "summarising")
         self.events.publish("summary_progress", {"meeting_id": meeting_id, "stage": "starting", "progress": 0.0})
         try:
             summarizer = Summarizer(build_client(self.settings), chunk_chars=self.settings.llm_context_chars)
             result = summarizer.run(
-                transcript=self.repository.transcript_text(meeting_id),
+                transcript=self.store.transcript_text(meeting_id),
                 date=meeting["started_at"],
                 duration=format_duration(meeting.get("duration_ms") or 0),
                 progress=lambda stage, value: self.events.publish(
                     "summary_progress", {"meeting_id": meeting_id, "stage": stage, "progress": value}
                 ),
                 want_title=meeting["title"].startswith("Meeting "),
+                speakers=[speaker["name"] for speaker in self.store.speaker_labels(meeting_id)],
             )
         except LLMError as exc:
-            self.repository.set_status(meeting_id, "recorded")
+            self.store.set_status(meeting_id, "recorded")
             self.events.publish("summary_failed", {"meeting_id": meeting_id, "message": str(exc)})
             return
         except Exception as exc:  # pragma: no cover - defensive
             logger.exception("Summarisation crashed")
-            self.repository.set_status(meeting_id, "recorded")
+            self.store.set_status(meeting_id, "recorded")
             self.events.publish("summary_failed", {"meeting_id": meeting_id, "message": str(exc)})
             return
 
-        self.repository.save_artifact(meeting_id, "minutes", result.minutes, result.model)
-        self.repository.save_artifact(meeting_id, "suggestions", result.suggestions, result.model)
-        self.repository.save_artifact(meeting_id, "notes", result.notes, result.model)
+        self.store.save_artifact(meeting_id, "minutes", result.minutes, result.model)
+        self.store.save_artifact(meeting_id, "suggestions", result.suggestions, result.model)
+        self.store.save_artifact(meeting_id, "notes", result.notes, result.model)
         if result.title:
-            self.repository.rename_meeting(meeting_id, result.title)
-        self.repository.set_status(meeting_id, "summarised")
+            self.store.rename_meeting(meeting_id, result.title)
+        self.store.set_status(meeting_id, "summarised")
         self.events.publish(
             "summary_ready",
-            {"meeting_id": meeting_id, "meeting": self.repository.get_meeting(meeting_id)},
+            {"meeting_id": meeting_id, "meeting": self.store.get_meeting(meeting_id)},
         )
 
     def shutdown(self) -> None:
@@ -137,7 +156,6 @@ class AppState:
                 self.session.stop()
             except Exception:
                 logger.exception("Failed to stop the recording cleanly")
-        self.database.close()
 
 
 # --------------------------------------------------------------------------
@@ -160,6 +178,19 @@ class PurgeRequest(BaseModel):
     retention_days: int = Field(ge=0, le=3650)
 
 
+class StorageRequest(BaseModel):
+    path: str = Field(min_length=1)
+    move_existing: bool = True
+
+
+class SpeakerNamesRequest(BaseModel):
+    names: dict[str, str]
+
+
+class ReclusterRequest(BaseModel):
+    threshold: float | None = Field(default=None, ge=0.1, le=0.99)
+
+
 class DeleteManyRequest(BaseModel):
     meeting_ids: list[str]
 
@@ -176,7 +207,7 @@ def create_app(config: AppConfig) -> FastAPI:
         if state.settings.auto_detect_meeting_apps:
             state.watcher.start()
         # Retention is enforced at every launch, not only on a timer.
-        purged = state.repository.purge_expired(state.settings.retention_days)
+        purged = state.store.purge_expired(state.settings.retention_days)
         if purged:
             logger.info("Retention policy removed %d meeting(s)", purged)
         yield
@@ -200,9 +231,17 @@ def create_app(config: AppConfig) -> FastAPI:
             "version": __version__,
             "platform": sys.platform,
             "data_dir": str(config.data_dir),
+            "storage_dir": str(state.store.root),
             "stt_model_loaded": state.engine.is_loaded,
             "recording": state.session.status(),
         }
+
+    @app.get("/speakers/health", dependencies=guard)
+    def speakers_health() -> dict[str, Any]:
+        status = embedder_status(state.settings.speaker_embedding_model)
+        status["enabled"] = state.settings.identify_speakers
+        status["loaded"] = state.embedder.is_loaded
+        return status
 
     @app.get("/devices", dependencies=guard)
     def devices() -> dict[str, Any]:
@@ -226,14 +265,14 @@ def create_app(config: AppConfig) -> FastAPI:
 
     @app.put("/settings", dependencies=guard)
     def put_settings(body: SettingsRequest) -> dict[str, Any]:
-        updated = state.repository.save_settings(body.values)
+        updated = state.settings_store.save(body.values)
         state.apply_settings(updated)
         state.events.publish("settings_changed", updated.to_dict())
         return updated.to_dict()
 
     @app.post("/settings/reset", dependencies=guard)
     def reset_settings() -> dict[str, Any]:
-        updated = state.repository.reset_settings()
+        updated = state.settings_store.reset()
         state.apply_settings(updated)
         state.events.publish("settings_changed", updated.to_dict())
         return updated.to_dict()
@@ -280,45 +319,46 @@ def create_app(config: AppConfig) -> FastAPI:
         offset: int = Query(default=0, ge=0),
         search: str = Query(default=""),
     ) -> dict[str, Any]:
-        return {"meetings": state.repository.list_meetings(limit, offset, search)}
+        return {"meetings": state.store.list_meetings(limit, offset, search)}
 
     @app.get("/meetings/{meeting_id}", dependencies=guard)
     def get_meeting(meeting_id: str) -> dict[str, Any]:
-        meeting = state.repository.get_meeting(meeting_id)
+        meeting = state.store.get_meeting(meeting_id)
         if meeting is None:
             raise HTTPException(status_code=404, detail="Meeting not found.")
         return {
             "meeting": meeting,
-            "segments": state.repository.list_segments(meeting_id),
-            "artifacts": state.repository.list_artifacts(meeting_id),
+            "segments": state.store.list_segments(meeting_id),
+            "artifacts": state.store.list_artifacts(meeting_id),
+            "speakers": state.store.speaker_labels(meeting_id),
         }
 
     @app.patch("/meetings/{meeting_id}", dependencies=guard)
     def rename_meeting(meeting_id: str, body: RenameRequest) -> dict[str, Any]:
-        if state.repository.get_meeting(meeting_id) is None:
+        if state.store.get_meeting(meeting_id) is None:
             raise HTTPException(status_code=404, detail="Meeting not found.")
-        state.repository.rename_meeting(meeting_id, body.title)
-        return state.repository.get_meeting(meeting_id) or {}
+        state.store.rename_meeting(meeting_id, body.title)
+        return state.store.get_meeting(meeting_id) or {}
 
     @app.post("/meetings/{meeting_id}/summarise", dependencies=guard)
     def summarise_meeting(meeting_id: str, force: bool = Query(default=True)) -> dict[str, Any]:
-        if state.repository.get_meeting(meeting_id) is None:
+        if state.store.get_meeting(meeting_id) is None:
             raise HTTPException(status_code=404, detail="Meeting not found.")
-        if not state.repository.list_segments(meeting_id):
+        if not state.store.list_segments(meeting_id):
             raise HTTPException(status_code=422, detail="This meeting has no transcript to summarise.")
         state.summarise(meeting_id, force=force)
         return {"status": "started", "meeting_id": meeting_id}
 
     @app.get("/meetings/{meeting_id}/export", dependencies=guard)
     def export_meeting(meeting_id: str, fmt: str = Query(default="md", pattern="^(md|txt|json)$")) -> Response:
-        meeting = state.repository.get_meeting(meeting_id)
+        meeting = state.store.get_meeting(meeting_id)
         if meeting is None:
             raise HTTPException(status_code=404, detail="Meeting not found.")
         content, media_type, extension = build_export(
             fmt,
             meeting,
-            state.repository.list_segments(meeting_id),
-            state.repository.list_artifacts(meeting_id),
+            state.store.list_segments(meeting_id),
+            state.store.list_artifacts(meeting_id),
         )
         filename = _safe_filename(meeting["title"], extension)
         return Response(
@@ -327,11 +367,47 @@ def create_app(config: AppConfig) -> FastAPI:
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
+    @app.get("/meetings/{meeting_id}/speakers", dependencies=guard)
+    def get_speakers(meeting_id: str) -> dict[str, Any]:
+        if state.store.get_meeting(meeting_id) is None:
+            raise HTTPException(status_code=404, detail="Meeting not found.")
+        return {"speakers": state.store.speaker_labels(meeting_id)}
+
+    @app.patch("/meetings/{meeting_id}/speakers", dependencies=guard)
+    def name_speakers(meeting_id: str, body: SpeakerNamesRequest) -> dict[str, Any]:
+        meeting = state.store.set_speaker_names(meeting_id, body.names)
+        if meeting is None:
+            raise HTTPException(status_code=404, detail="Meeting not found.")
+        state.events.publish("speakers_changed", {"meeting_id": meeting_id})
+        return {"meeting": meeting, "speakers": state.store.speaker_labels(meeting_id)}
+
+    @app.post("/meetings/{meeting_id}/speakers/redetect", dependencies=guard)
+    def redetect_speakers(meeting_id: str, body: ReclusterRequest) -> dict[str, Any]:
+        """Re-cluster the stored voice fingerprints, fixing early mislabels."""
+        if state.store.get_meeting(meeting_id) is None:
+            raise HTTPException(status_code=404, detail="Meeting not found.")
+        vectors = state.store.load_embeddings(meeting_id)
+        if not vectors:
+            raise HTTPException(
+                status_code=422,
+                detail="This meeting has no voice fingerprints. Speaker identification was off while it was recorded.",
+            )
+        labels = cluster_offline(
+            [vector for _, vector in vectors],
+            threshold=body.threshold if body.threshold is not None else state.settings.speaker_similarity,
+            max_speakers=state.settings.speaker_max_count,
+        )
+        changed = state.store.apply_speaker_assignment(
+            meeting_id, {segment_id: label for (segment_id, _), label in zip(vectors, labels)}
+        )
+        state.events.publish("speakers_changed", {"meeting_id": meeting_id})
+        return {"changed": changed, "speakers": state.store.speaker_labels(meeting_id)}
+
     @app.delete("/meetings/{meeting_id}", dependencies=guard)
     def delete_meeting(meeting_id: str) -> dict[str, Any]:
         if state.session.is_active and state.session.status().get("meeting_id") == meeting_id:
             raise HTTPException(status_code=409, detail="Stop the recording before deleting this meeting.")
-        if not state.repository.delete_meeting(meeting_id):
+        if not state.store.delete_meeting(meeting_id):
             raise HTTPException(status_code=404, detail="Meeting not found.")
         state.events.publish("meeting_deleted", {"meeting_id": meeting_id})
         return {"deleted": 1}
@@ -339,14 +415,14 @@ def create_app(config: AppConfig) -> FastAPI:
     # -- admin: the user's own data controls --------------------------------
     @app.get("/admin/stats", dependencies=guard)
     def admin_stats() -> dict[str, Any]:
-        return state.repository.storage_stats()
+        return state.store.storage_stats()
 
     @app.post("/admin/delete", dependencies=guard)
     def admin_delete_many(body: DeleteManyRequest) -> dict[str, Any]:
         active = state.session.status().get("meeting_id")
         if active and active in body.meeting_ids:
             raise HTTPException(status_code=409, detail="Stop the recording before deleting this meeting.")
-        deleted = state.repository.delete_meetings(body.meeting_ids)
+        deleted = state.store.delete_meetings(body.meeting_ids)
         state.events.publish("meetings_deleted", {"count": deleted})
         return {"deleted": deleted}
 
@@ -354,19 +430,38 @@ def create_app(config: AppConfig) -> FastAPI:
     def admin_delete_all() -> dict[str, Any]:
         if state.session.is_active:
             raise HTTPException(status_code=409, detail="Stop the recording before deleting everything.")
-        deleted = state.repository.delete_all()
+        deleted = state.store.delete_all()
         state.events.publish("meetings_deleted", {"count": deleted, "all": True})
         return {"deleted": deleted}
 
     @app.post("/admin/delete-audio", dependencies=guard)
     def admin_delete_audio(meeting_id: str | None = Query(default=None)) -> dict[str, Any]:
-        removed = state.repository.delete_audio_only(meeting_id)
+        removed = state.store.delete_audio_only(meeting_id)
         state.events.publish("audio_deleted", {"count": removed})
         return {"deleted": removed}
 
+    @app.get("/admin/storage", dependencies=guard)
+    def get_storage() -> dict[str, Any]:
+        return {
+            "storage_dir": str(state.store.root),
+            "default_storage_dir": str(config.default_storage_dir),
+            "is_default": str(state.store.root) == str(config.default_storage_dir),
+        }
+
+    @app.post("/admin/storage", dependencies=guard)
+    def set_storage(body: StorageRequest) -> dict[str, Any]:
+        try:
+            return state.change_storage(body.path, body.move_existing)
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except OSError as exc:
+            raise HTTPException(status_code=422, detail=f"Could not use that folder: {exc}") from exc
+
     @app.post("/admin/purge", dependencies=guard)
     def admin_purge(body: PurgeRequest) -> dict[str, Any]:
-        deleted = state.repository.purge_expired(body.retention_days)
+        deleted = state.store.purge_expired(body.retention_days)
         state.events.publish("meetings_deleted", {"count": deleted})
         return {"deleted": deleted}
 

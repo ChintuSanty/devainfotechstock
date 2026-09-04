@@ -18,3 +18,6 @@ sounddevice==0.5.1; sys_platform != 'win32'
 
 # Meeting app detection (labelling only - capture is app-agnostic)
 psutil==6.1.1
+
+# Per-speaker identification is an optional extra, because it pulls in PyTorch:
+#   pip install -r sidecar/requirements-speakers.txt

@@ -43,6 +43,7 @@ class Summarizer:
         duration: str,
         progress: ProgressFn | None = None,
         want_title: bool = True,
+        speakers: list[str] | None = None,
     ) -> SummaryResult:
         transcript = transcript.strip()
         if not transcript:
@@ -55,11 +56,14 @@ class Summarizer:
         chunks = self.chunk(transcript)
         report("analysing", 0.05)
 
+        note = prompts.channel_note(speakers)
+        chunk_system = prompts.CHUNK_SYSTEM.format(channel_note=note)
+
         notes_parts: list[str] = []
         for index, chunk in enumerate(chunks, start=1):
             notes_parts.append(
                 self.client.complete(
-                    prompts.CHUNK_SYSTEM,
+                    chunk_system,
                     prompts.CHUNK_USER.format(index=index, total=len(chunks), chunk=chunk),
                 )
             )
@@ -68,7 +72,7 @@ class Summarizer:
 
         report("writing_minutes", 0.65)
         minutes = self.client.complete(
-            prompts.MINUTES_SYSTEM,
+            prompts.MINUTES_SYSTEM.format(channel_note=note),
             prompts.MINUTES_USER.format(date=date, duration=duration, notes=notes),
         )
 

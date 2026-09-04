@@ -25,7 +25,8 @@ from ..audio.source import AudioSource, open_source
 from ..audio.vad import Utterance, UtteranceSegmenter
 from ..config import Settings
 from ..events import EventBus
-from ..storage.repository import MeetingRepository
+from ..speakers import OnlineSpeakerClusterer, SpeakerEmbedder
+from ..storage import MeetingStore
 from ..stt.engine import WhisperEngine
 from .wav import ChannelWavWriter, mix_down
 
@@ -84,15 +85,17 @@ class RecordingSession:
 
     def __init__(
         self,
-        repository: MeetingRepository,
+        store: MeetingStore,
         engine: WhisperEngine,
         events: EventBus,
-        audio_dir: Path,
+        embedder: SpeakerEmbedder,
     ) -> None:
-        self.repository = repository
+        self.store = store
         self.engine = engine
         self.events = events
-        self.audio_dir = audio_dir
+        self.embedder = embedder
+        self.clusterer = OnlineSpeakerClusterer()
+        self._meeting_dir: Path | None = None
 
         self._state = SessionState.IDLE
         self._lock = threading.RLock()
@@ -112,6 +115,7 @@ class RecordingSession:
         self._segment_count = 0
         self._error: str | None = None
         self._settings = Settings()
+        self._identify_speakers = False
 
     # -- introspection ------------------------------------------------------
     @property
@@ -172,18 +176,32 @@ class RecordingSession:
             self._channels = {}
 
             default_title = title or f"Meeting {datetime.now().strftime('%d %b %Y, %H:%M')}"
-            meeting = self.repository.create_meeting(default_title, source_app)
+            meeting = self.store.create_meeting(default_title, source_app)
             self._meeting_id = meeting["id"]
             self._title = meeting["title"]
             self._started_at = meeting["started_at"]
+            self._meeting_dir = Path(meeting["folder"])
             self._started_monotonic = time.monotonic()
+
+            # Speaker identification only applies to the meeting-audio channel;
+            # the microphone is always the user.
+            self._identify_speakers = settings.identify_speakers and settings.capture_system_audio
+            self.clusterer = OnlineSpeakerClusterer(
+                threshold=settings.speaker_similarity, max_speakers=settings.speaker_max_count
+            )
+            if self._identify_speakers and not self.embedder.load():
+                self._identify_speakers = False
+                self.events.publish(
+                    "recording_warning",
+                    {"message": "Speaker identification is on but no embedding model is installed."},
+                )
 
             try:
                 self._open_channels(settings)
             except Exception as exc:
                 self._state = SessionState.ERROR
                 self._error = str(exc)
-                self.repository.set_status(meeting["id"], "failed")
+                self.store.set_status(meeting["id"], "failed")
                 self._close_channels()
                 self.events.publish("recording_error", {"message": str(exc)})
                 raise
@@ -222,8 +240,8 @@ class RecordingSession:
 
             writer = None
             wav_path = None
-            if settings.store_audio and self._meeting_id:
-                wav_path = self.audio_dir / f"{self._meeting_id}-{name}.wav"
+            if settings.store_audio and self._meeting_dir is not None:
+                wav_path = self._meeting_dir / f"channel-{name}.wav"
                 writer = ChannelWavWriter(wav_path, settings.sample_rate)
 
             self._channels[name] = _ChannelRuntime(
@@ -297,13 +315,14 @@ class RecordingSession:
         duration_ms = self._elapsed_ms()
         with self._lock:
             if meeting_id:
-                self.repository.finish_meeting(meeting_id, duration_ms, audio_path)
+                self.store.finish_meeting(meeting_id, duration_ms, audio_path)
             self._state = SessionState.IDLE
             self._started_monotonic = 0.0
             finished_id, self._meeting_id = meeting_id, None
             self._title = None
+            self._meeting_dir = None
 
-        meeting = self.repository.get_meeting(finished_id) if finished_id else None
+        meeting = self.store.get_meeting(finished_id) if finished_id else None
         self.events.publish("recording_stopped", {"meeting": meeting})
         return meeting
 
@@ -315,10 +334,10 @@ class RecordingSession:
                 channel.writer = None
             if channel.wav_path is not None:
                 paths.append(channel.wav_path)
-        if not meeting_id or not paths:
+        if not meeting_id or not paths or self._meeting_dir is None:
             return None
         try:
-            destination = self.audio_dir / f"{meeting_id}.wav"
+            destination = self._meeting_dir / "audio.wav"
             mix_down(paths, destination, self._settings.sample_rate)
             for path in paths:
                 path.unlink(missing_ok=True)
@@ -392,17 +411,40 @@ class RecordingSession:
             if not text or _is_noise(text):
                 continue
 
-            segment = self.repository.add_segment(
+            speaker, embedding = self._identify(item)
+            segment = self.store.add_segment(
                 meeting_id=meeting_id,
                 channel=item.channel,
                 start_ms=item.utterance.start_ms,
                 end_ms=item.utterance.end_ms,
                 text=text,
                 confidence=result.confidence,
+                speaker=speaker,
+                embedding=embedding,
             )
+            segment["speaker_name"] = segment["speaker"]
             with self._lock:
                 self._segment_count += 1
             self.events.publish("segment", segment)
+
+    def _identify(self, item: _PendingUtterance) -> tuple[str | None, list[float] | None]:
+        """Work out which participant just spoke, if speaker ID is enabled."""
+        if item.channel == CHANNEL_MIC:
+            return None, None
+        if not self._identify_speakers:
+            return None, None
+
+        duration_ms = item.utterance.end_ms - item.utterance.start_ms
+        if duration_ms < self._settings.speaker_min_utterance_ms:
+            # Too short to characterise a voice; don't pollute the centroids.
+            return None, None
+
+        embedding = self.embedder.embed(item.utterance.audio)
+        if embedding is None:
+            return None, None
+
+        label = self.clusterer.assign(embedding)
+        return label, [float(value) for value in embedding]
 
 
 # Whisper emits these for music stings, silence and applause.

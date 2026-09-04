@@ -65,7 +65,8 @@ export function Overlay() {
       }
       case 'segment': {
         const segment = event.payload as unknown as Segment;
-        setLastLine(`${segment.channel === 'me' ? 'You' : 'Participant'}: ${segment.text}`);
+        const who = segment.speaker_name || segment.speaker || (segment.channel === 'me' ? 'You' : 'Participant');
+        setLastLine(`${who}: ${segment.text}`);
         break;
       }
       case 'meeting_apps':

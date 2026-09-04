@@ -131,3 +131,50 @@ def test_json_export_round_trips():
     parsed = json.loads(content)
     assert parsed["meeting"]["title"] == "Budget review"
     assert len(parsed["segments"]) == 2
+
+
+# -- named speakers in exports -------------------------------------------
+def _named_fixture():
+    meeting, segments, artifacts = _fixture()
+    segments[0]["speaker_name"] = "You"
+    segments[1]["speaker_name"] = "Priya"
+    return meeting, segments, artifacts
+
+
+def test_markdown_export_uses_speaker_names():
+    meeting, segments, artifacts = _named_fixture()
+    segments.append({"channel": "others", "start_ms": 8_000, "end_ms": 9_000,
+                     "text": "One more thing.", "speaker_name": "Sam"})
+    content, _, _ = build_export("md", meeting, segments, artifacts)
+    assert "**[00:00:03] Priya:** Yes, go ahead." in content
+    assert "**Voices heard:** You, Priya, Sam" in content
+
+
+def test_text_export_uses_speaker_names():
+    content, _, _ = build_export("txt", *_named_fixture())
+    assert "[00:00:03] Priya: Yes, go ahead." in content
+
+
+def test_exports_fall_back_to_channel_labels_without_speaker_ids():
+    content, _, _ = build_export("md", *_fixture())
+    assert "**[00:00:03] Participant:**" in content
+    # One undifferentiated participant channel is not a speaker roster.
+    assert "Voices heard" not in content
+
+
+def test_channel_note_switches_when_speakers_are_known():
+    from app.llm.prompts import MIXED_CHANNEL_NOTE, channel_note
+
+    assert channel_note([]) == MIXED_CHANNEL_NOTE
+    assert channel_note(["Participant"]) == MIXED_CHANNEL_NOTE
+
+    note = channel_note(["You", "Priya", "S2"])
+    assert "'Priya'" in note and "S1" in note
+
+
+def test_the_summariser_passes_the_roster_into_the_prompt():
+    client = FakeClient()
+    Summarizer(client, chunk_chars=10_000).run(
+        transcript(10), date="d", duration="1m", speakers=["You", "Priya", "Sam"]
+    )
+    assert any("'Priya'" in system for system, _ in client.calls)

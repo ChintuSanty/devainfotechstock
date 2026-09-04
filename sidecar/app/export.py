@@ -24,8 +24,28 @@ def format_timestamp(ms: int) -> str:
     return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
 
 
-def speaker_label(channel: str) -> str:
-    return "You" if channel == "me" else "Participant"
+def speaker_label(segment: dict[str, Any]) -> str:
+    """Prefer the resolved name, falling back to the channel's generic label."""
+    name = segment.get("speaker_name") or segment.get("speaker")
+    if name:
+        return str(name)
+    return "You" if segment.get("channel") == "me" else "Participant"
+
+
+def participants(segments: list[dict[str, Any]]) -> list[str]:
+    """Distinct voices, in the order they were first heard."""
+    seen: list[str] = []
+    for segment in segments:
+        name = speaker_label(segment)
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
+def _has_identified_speakers(segments: list[dict[str, Any]]) -> bool:
+    """True once the meeting-audio channel has been split into individuals."""
+    others = {speaker_label(s) for s in segments if s.get("channel") != "me"}
+    return len(others) > 1
 
 
 def to_markdown(meeting: dict[str, Any], segments: list[dict[str, Any]], artifacts: list[dict[str, Any]]) -> str:
@@ -38,6 +58,8 @@ def to_markdown(meeting: dict[str, Any], segments: list[dict[str, Any]], artifac
     ]
     if meeting.get("source_app"):
         lines.append(f"- **Source:** {meeting['source_app']}")
+    if _has_identified_speakers(segments):
+        lines.append(f"- **Voices heard:** {', '.join(participants(segments))}")
     lines.append("")
 
     if by_kind.get("minutes"):
@@ -48,7 +70,7 @@ def to_markdown(meeting: dict[str, Any], segments: list[dict[str, Any]], artifac
     lines += ["## Full Transcript", ""]
     for segment in segments:
         lines.append(
-            f"**[{format_timestamp(segment['start_ms'])}] {speaker_label(segment['channel'])}:** {segment['text']}"
+            f"**[{format_timestamp(segment['start_ms'])}] {speaker_label(segment)}:** {segment['text']}"
         )
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
@@ -57,9 +79,7 @@ def to_markdown(meeting: dict[str, Any], segments: list[dict[str, Any]], artifac
 def to_text(meeting: dict[str, Any], segments: list[dict[str, Any]]) -> str:
     lines = [meeting["title"], "=" * len(meeting["title"]), ""]
     for segment in segments:
-        lines.append(
-            f"[{format_timestamp(segment['start_ms'])}] {speaker_label(segment['channel'])}: {segment['text']}"
-        )
+        lines.append(f"[{format_timestamp(segment['start_ms'])}] {speaker_label(segment)}: {segment['text']}")
     return "\n".join(lines) + "\n"
 
 

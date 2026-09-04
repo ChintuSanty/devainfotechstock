@@ -1,7 +1,8 @@
 import { useEffect, useState } from 'react';
 import { api } from '../../shared/api';
 import { bridge } from '../../shared/bridge';
-import type { AppSettings, DeviceInfo, LlmHealth } from '../../shared/types';
+import { StorageFolder } from '../components/StorageFolder';
+import type { AppSettings, DeviceInfo, LlmHealth, SpeakerHealth } from '../../shared/types';
 
 const STT_MODELS = [
   { value: 'tiny.en', label: 'tiny.en - fastest, roughest (very old machines)' },
@@ -15,6 +16,7 @@ export function SettingsView() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [devices, setDevices] = useState<{ loopback: DeviceInfo[]; input: DeviceInfo[] }>({ loopback: [], input: [] });
   const [llm, setLlm] = useState<LlmHealth | null>(null);
+  const [speakers, setSpeakers] = useState<SpeakerHealth | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
@@ -22,6 +24,7 @@ export function SettingsView() {
     void api.getSettings().then(setSettings).catch((cause) => setError((cause as Error).message));
     void api.devices().then(setDevices).catch(() => undefined);
     void api.llmHealth().then(setLlm).catch(() => undefined);
+    void api.speakerHealth().then(setSpeakers).catch(() => undefined);
   }, []);
 
   const update = async (values: Partial<AppSettings>) => {
@@ -211,6 +214,74 @@ export function SettingsView() {
           />
           Write the minutes automatically when a recording stops
         </label>
+      </div>
+
+      <div className="card">
+        <h2>Storage</h2>
+        <p className="hint">
+          Meetings are stored as plain text - JSON metadata and Markdown transcripts - so they stay readable
+          without this app. Pick any folder you can write to.
+        </p>
+        <StorageFolder />
+      </div>
+
+      <div className="card">
+        <h2>Who said what</h2>
+        <p className="hint">
+          Your microphone is always labelled &ldquo;You&rdquo;. Turning this on separates the other people in the
+          meeting audio by voice, so the transcript and the minutes can attribute lines to individuals.
+        </p>
+
+        {speakers && !speakers.available && (
+          <div className="info-banner">
+            No voice model is installed, so everyone else stays labelled &ldquo;Participant&rdquo;. Install one with{' '}
+            <code>{speakers.install_hint}</code> and restart the local service.
+          </div>
+        )}
+        {speakers?.available && (
+          <div className="info-banner">Using the {speakers.backend} voice model.</div>
+        )}
+
+        <div className="stack">
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={settings.identify_speakers}
+              disabled={!speakers?.available}
+              onChange={(event) => update({ identify_speakers: event.target.checked })}
+            />
+            Identify individual speakers in the meeting audio
+          </label>
+
+          <div className="grid-2">
+            <div className="field">
+              <label>Voice match strictness</label>
+              <input
+                type="range"
+                min={0.4}
+                max={0.85}
+                step={0.01}
+                value={settings.speaker_similarity}
+                onChange={(event) => update({ speaker_similarity: Number(event.target.value) })}
+              />
+              <p className="note">
+                {settings.speaker_similarity.toFixed(2)} - lower merges similar voices into one person, higher
+                splits one person into several. You can re-run this per meeting afterwards.
+              </p>
+            </div>
+            <div className="field">
+              <label>Maximum speakers per meeting</label>
+              <input
+                type="number"
+                min={2}
+                max={30}
+                value={settings.speaker_max_count}
+                onChange={(event) => update({ speaker_max_count: Number(event.target.value) })}
+              />
+              <p className="note">Extra voices beyond this are folded into the closest match.</p>
+            </div>
+          </div>
+        </div>
       </div>
 
       <div className="card">

@@ -157,7 +157,9 @@ export function LiveView({ status, segments, onStatusChange }: Props) {
               <div key={segment.id} className={`turn ${segment.channel}`}>
                 <span className="time">{formatTimestamp(segment.start_ms)}</span>
                 <span>
-                  <span className="who">{segment.channel === 'me' ? 'You' : 'Participant'}</span>
+                  <span className="who">
+                    {segment.speaker_name || segment.speaker || (segment.channel === 'me' ? 'You' : 'Participant')}
+                  </span>
                   {segment.text}
                 </span>
               </div>

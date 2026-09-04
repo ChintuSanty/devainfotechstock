@@ -5,18 +5,35 @@ The transcript comes from two channels - "You" (microphone) and "Participant"
 invent speaker names it cannot know.
 """
 
-CHANNEL_NOTE = (
+MIXED_CHANNEL_NOTE = (
     "The transcript labels each line as either 'You' (the person running this app, "
     "captured from their microphone) or 'Participant' (everyone else, captured from "
     "the meeting audio). Individual participants cannot be told apart, so refer to "
     "them collectively unless a name is spoken aloud in the transcript."
 )
 
-CHUNK_SYSTEM = f"""You are a meeting analyst. You are given one portion of an automatic \
+
+def channel_note(speakers: list[str] | None = None) -> str:
+    """Tell the model exactly what the speaker labels in this transcript mean."""
+    named = [name for name in (speakers or []) if name and name != "Participant"]
+    if len(named) <= 1:
+        return MIXED_CHANNEL_NOTE
+    listed = ", ".join(f"'{name}'" for name in named)
+    return (
+        "The transcript labels each line with who spoke it: " + listed + ". "
+        "'You' is the person running this app, captured from their microphone; the "
+        "others were separated by voice from the meeting audio. Labels like 'S1' are "
+        "distinct voices that have not been given a name yet - treat each as one "
+        "consistent person, and use the label as their name. Voice separation is not "
+        "perfect, so do not draw conclusions from a single line attributed oddly."
+    )
+
+
+CHUNK_SYSTEM = """You are a meeting analyst. You are given one portion of an automatic \
 transcript of a meeting. The transcript may contain speech-recognition errors; \
 infer the intended meaning where it is obvious and ignore filler words.
 
-{CHANNEL_NOTE}
+{channel_note}
 
 Extract only what is actually in this portion. Never invent attendees, dates, \
 numbers or commitments. If a section has nothing, write "None"."""
@@ -25,7 +42,8 @@ CHUNK_USER = """Summarise this portion of the meeting under these headings:
 
 TOPICS: bullet points of what was discussed
 DECISIONS: decisions that were actually made
-ACTIONS: action items as "owner - task - due date (or 'not stated')"
+ACTIONS: action items as "owner - task - due date (or 'not stated')", using the \
+speaker label of whoever took the action when it is clear
 QUESTIONS: open questions raised but not resolved
 FACTS: names, dates, figures and links mentioned
 
@@ -34,12 +52,14 @@ Transcript portion {index} of {total}:
 {chunk}
 ---"""
 
-MINUTES_SYSTEM = f"""You are an experienced executive assistant writing the official \
+MINUTES_SYSTEM = """You are an experienced executive assistant writing the official \
 minutes of a meeting. Write in clear, neutral, professional English.
 
-{CHANNEL_NOTE}
+{channel_note}
 
 Rules:
+- Attribute decisions and action items to the named speaker when the transcript \
+  makes it clear who committed to what.
 - Use only information present in the notes you are given. Do not invent anything.
 - Write "Not stated" rather than guessing an owner, date or figure.
 - Be concise. Minutes are read by people who were not in the room.

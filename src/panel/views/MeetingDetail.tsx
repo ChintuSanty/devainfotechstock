@@ -2,8 +2,9 @@ import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../shared/api';
 import { formatDate, formatDuration, formatTimestamp } from '../../shared/format';
 import { useSidecarEvents } from '../../shared/useSidecarEvents';
-import type { Artifact, Meeting, Segment } from '../../shared/types';
+import type { Artifact, Meeting, Segment, Speaker } from '../../shared/types';
 import { Markdown } from '../components/Markdown';
+import { SpeakerRoster } from '../components/SpeakerRoster';
 import { StatusBadge } from './MeetingsView';
 
 type DetailTab = 'minutes' | 'suggestions' | 'transcript';
@@ -12,6 +13,7 @@ export function MeetingDetail({ meetingId, onBack }: { meetingId: string; onBack
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [segments, setSegments] = useState<Segment[]>([]);
   const [artifacts, setArtifacts] = useState<Artifact[]>([]);
+  const [speakers, setSpeakers] = useState<Speaker[]>([]);
   const [tab, setTab] = useState<DetailTab>('minutes');
   const [progress, setProgress] = useState<{ stage: string; value: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -25,6 +27,7 @@ export function MeetingDetail({ meetingId, onBack }: { meetingId: string; onBack
       setMeeting(data.meeting);
       setSegments(data.segments);
       setArtifacts(data.artifacts);
+      setSpeakers(data.speakers ?? []);
       setDraftTitle(data.meeting.title);
       setError(null);
     } catch (cause) {
@@ -51,10 +54,14 @@ export function MeetingDetail({ meetingId, onBack }: { meetingId: string; onBack
       setError(payload.message ?? 'Could not generate the minutes.');
       void load();
     }
+    if (event.type === 'speakers_changed') void load();
   });
 
   const byKind = Object.fromEntries(artifacts.map((artifact) => [artifact.kind, artifact]));
   const hasMinutes = Boolean(byKind.minutes);
+  // Re-detection re-clusters stored fingerprints, which only exist when speaker
+  // identification was on while the meeting was recorded.
+  const hasVoicePrints = segments.some((segment) => /^S\d+$/.test(segment.speaker ?? ''));
 
   const regenerate = async () => {
     setBusy(true);
@@ -202,32 +209,49 @@ export function MeetingDetail({ meetingId, onBack }: { meetingId: string; onBack
       )}
 
       {tab === 'transcript' && (
-        <div className="card">
-          {segments.length === 0 ? (
-            <div className="empty">No speech was transcribed for this meeting.</div>
-          ) : (
-            <>
-              <div className="row between" style={{ marginBottom: 14 }}>
-                <p className="hint" style={{ margin: 0 }}>
-                  &ldquo;You&rdquo; is your microphone; &ldquo;Participant&rdquo; is everyone else, captured from the meeting audio.
-                </p>
-                <button onClick={() => exportAs('txt')}>Export transcript</button>
-              </div>
-              <div className="transcript">
-                {segments.map((segment) => (
-                  <div key={segment.id} className={`turn ${segment.channel}`}>
-                    <span className="time">{formatTimestamp(segment.start_ms)}</span>
-                    <span>
-                      <span className="who">{segment.channel === 'me' ? 'You' : 'Participant'}</span>
-                      {segment.text}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
+        <>
+          <SpeakerRoster
+            meetingId={meetingId}
+            speakers={speakers}
+            canRedetect={hasVoicePrints}
+            onChanged={load}
+          />
+          <div className="card">
+            {segments.length === 0 ? (
+              <div className="empty">No speech was transcribed for this meeting.</div>
+            ) : (
+              <>
+                <div className="row between" style={{ marginBottom: 14 }}>
+                  <p className="hint" style={{ margin: 0 }}>
+                    &ldquo;You&rdquo; is your microphone; everyone else was captured from the meeting audio.
+                  </p>
+                  <button onClick={() => exportAs('txt')}>Export transcript</button>
+                </div>
+                <div className="transcript">
+                  {segments.map((segment) => (
+                    <div key={segment.id} className={`turn ${segment.channel}`}>
+                      <span className="time">{formatTimestamp(segment.start_ms)}</span>
+                      <span>
+                        <span className={`who ${isNamed(segment) ? 'named' : ''}`}>{speakerOf(segment)}</span>
+                        {segment.text}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        </>
       )}
     </>
   );
+}
+
+function speakerOf(segment: Segment): string {
+  return segment.speaker_name || segment.speaker || (segment.channel === 'me' ? 'You' : 'Participant');
+}
+
+function isNamed(segment: Segment): boolean {
+  const name = speakerOf(segment);
+  return name !== 'You' && name !== 'Participant';
 }

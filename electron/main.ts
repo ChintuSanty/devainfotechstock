@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, Tray, nativeImage } from 'electron';
+import { app, BrowserWindow, dialog, globalShortcut, ipcMain, Menu, shell, Tray, nativeImage } from 'electron';
 import path from 'node:path';
 import { Sidecar } from './sidecar';
 import { createOverlayWindow, createPanelWindow, resizeOverlay } from './windows';
@@ -91,6 +91,25 @@ function registerIpc(): void {
   // Lets clicks fall through the transparent corners of the overlay window.
   ipcMain.handle('overlay:set-interactive', (_event, interactive: boolean) => {
     overlay?.setIgnoreMouseEvents(!interactive, { forward: true });
+  });
+
+  // Used by Settings to pick where meetings are stored.
+  ipcMain.handle('dialog:choose-folder', async (_event, current?: string) => {
+    const parent = panel && !panel.isDestroyed() ? panel : undefined;
+    const options = {
+      title: 'Choose where MeetingScribe stores meetings',
+      properties: ['openDirectory', 'createDirectory'] as const,
+      defaultPath: current || app.getPath('documents'),
+    };
+    const result = parent
+      ? await dialog.showOpenDialog(parent, { ...options, properties: [...options.properties] })
+      : await dialog.showOpenDialog({ ...options, properties: [...options.properties] });
+    return result.canceled || result.filePaths.length === 0 ? null : result.filePaths[0];
+  });
+
+  ipcMain.handle('shell:open-path', async (_event, target: string) => {
+    const error = await shell.openPath(target);
+    return error || null;
   });
 
   ipcMain.handle('app:quit', () => {

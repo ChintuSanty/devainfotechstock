@@ -1,9 +1,9 @@
 """Runtime configuration.
 
-Everything the user can tune lives here. Values are persisted in the local
-SQLite database so the Electron settings screen can change them at runtime;
-environment variables win at startup, which is what the packaged app uses to
-point the sidecar at Electron's userData directory.
+Everything the user can tune lives here. Settings are persisted as JSON in the
+app directory - separate from the meeting store, because the meeting store's
+location is itself a setting. Environment variables win at startup, which is
+how the packaged app points the sidecar at Electron's userData directory.
 """
 
 from __future__ import annotations
@@ -15,7 +15,10 @@ from typing import Any
 
 
 def default_data_dir() -> Path:
-    """Where meetings live. Electron overrides this with its userData path."""
+    """App directory: settings, logs and the default meeting store live here.
+
+    Electron overrides it with its userData path.
+    """
     override = os.environ.get("MEETINGSCRIBE_DATA_DIR")
     if override:
         return Path(override)
@@ -60,6 +63,21 @@ class Settings:
     llm_context_chars: int = 12_000  # per map-reduce chunk
     llm_timeout_seconds: int = 300
 
+    # --- Speaker identification -----------------------------------------
+    # Splits the meeting-audio channel into individual people. Needs one of the
+    # optional embedding models (see requirements-speakers.txt); when none is
+    # installed everyone stays labelled "Participant".
+    identify_speakers: bool = False
+    speaker_similarity: float = 0.62  # cosine similarity to join an existing voice
+    speaker_max_count: int = 12
+    speaker_min_utterance_ms: int = 700  # too short to characterise a voice
+    speaker_embedding_model: str = "auto"  # auto | speechbrain | resemblyzer
+
+    # --- Storage ---------------------------------------------------------
+    # Where meeting folders are written. Empty means "meetings" inside the app
+    # directory. Meetings are plain text: JSON metadata, Markdown transcripts.
+    storage_dir: str = ""
+
     # --- Privacy / retention -------------------------------------------
     store_audio: bool = False  # off by default: transcripts only
     retention_days: int = 0  # 0 = keep forever
@@ -99,17 +117,16 @@ class AppConfig:
     port: int = 0  # 0 -> the OS picks a free port
 
     @property
-    def db_path(self) -> Path:
-        return self.data_dir / "meetingscribe.db"
+    def settings_path(self) -> Path:
+        return self.data_dir / "settings.json"
 
     @property
-    def audio_dir(self) -> Path:
-        return self.data_dir / "recordings"
+    def default_storage_dir(self) -> Path:
+        return self.data_dir / "meetings"
 
-    @property
-    def export_dir(self) -> Path:
-        return self.data_dir / "exports"
+    def resolve_storage_dir(self, settings: Settings) -> Path:
+        chosen = (settings.storage_dir or "").strip()
+        return Path(chosen).expanduser() if chosen else self.default_storage_dir
 
     def ensure_dirs(self) -> None:
-        for path in (self.data_dir, self.audio_dir, self.export_dir):
-            path.mkdir(parents=True, exist_ok=True)
+        self.data_dir.mkdir(parents=True, exist_ok=True)

@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api } from '../../shared/api';
 import { formatBytes, formatDate, formatDuration } from '../../shared/format';
+import { bridge } from '../../shared/bridge';
+import { StorageFolder } from '../components/StorageFolder';
 import type { AppSettings, Meeting, StorageStats } from '../../shared/types';
 
 /**
@@ -76,7 +78,18 @@ export function AdminView({ version, onChanged }: { version: number; onChanged: 
 
       <div className="card">
         <h2>What is stored</h2>
-        <p className="hint" style={{ wordBreak: 'break-all' }}>{stats?.data_dir ?? ''}</p>
+        <div className="row between" style={{ marginBottom: 14 }}>
+          <p className="hint" style={{ margin: 0, wordBreak: 'break-all' }}>
+            {stats?.storage_dir ?? ''}
+          </p>
+          <button
+            className="ghost"
+            onClick={() => stats && void bridge()?.openPath(stats.storage_dir)}
+            disabled={!stats}
+          >
+            Open folder
+          </button>
+        </div>
         <div className="grid-2">
           <div className="stat">
             <div className="value">{stats?.meetings ?? 0}</div>
@@ -87,8 +100,8 @@ export function AdminView({ version, onChanged }: { version: number; onChanged: 
             <div className="label">Transcript lines</div>
           </div>
           <div className="stat">
-            <div className="value">{formatBytes(stats?.database_bytes ?? 0)}</div>
-            <div className="label">Database</div>
+            <div className="value">{formatBytes(stats?.text_bytes ?? 0)}</div>
+            <div className="label">Text files</div>
           </div>
           <div className="stat">
             <div className="value">{formatBytes(stats?.audio_bytes ?? 0)}</div>
@@ -100,6 +113,15 @@ export function AdminView({ version, onChanged }: { version: number; onChanged: 
             Oldest meeting kept: {formatDate(stats.oldest_meeting_at)}
           </p>
         )}
+      </div>
+
+      <div className="card">
+        <h2>Where it is stored</h2>
+        <p className="hint">
+          Every meeting is a folder of plain text. Move it anywhere you like - a synced drive, an encrypted
+          volume, or somewhere you back up.
+        </p>
+        <StorageFolder onChanged={() => void load()} />
       </div>
 
       <div className="card">

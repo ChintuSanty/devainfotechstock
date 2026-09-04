@@ -9,6 +9,10 @@ export interface Meeting {
   source_app: string | null;
   duration_ms: number;
   audio_path: string | null;
+  /** Absolute path of this meeting's folder on disk. */
+  folder?: string;
+  /** Auto label -> the name the user gave that voice. */
+  speakers?: Record<string, string>;
   segment_count?: number;
 }
 
@@ -16,18 +20,30 @@ export interface Segment {
   id: number;
   meeting_id: string;
   channel: Channel;
+  /** Stable auto label: "You" for the mic, "S1"/"S2"... or "Participant". */
+  speaker: string;
+  /** The label resolved through the meeting's speaker names. */
+  speaker_name?: string;
   start_ms: number;
   end_ms: number;
   text: string;
   confidence: number | null;
 }
 
+export interface Speaker {
+  label: string;
+  name: string;
+  channel: Channel;
+  segments: number;
+  speaking_ms: number;
+}
+
 export interface Artifact {
-  id: number;
   meeting_id: string;
   kind: 'minutes' | 'suggestions' | 'notes';
   content: string;
   model: string | null;
+  created_at?: string;
 }
 
 export interface RecordingStatus {
@@ -63,6 +79,12 @@ export interface AppSettings {
   llm_temperature: number;
   llm_context_chars: number;
   llm_timeout_seconds: number;
+  identify_speakers: boolean;
+  speaker_similarity: number;
+  speaker_max_count: number;
+  speaker_min_utterance_ms: number;
+  speaker_embedding_model: string;
+  storage_dir: string;
   store_audio: boolean;
   retention_days: number;
   auto_summarise_on_stop: boolean;
@@ -83,11 +105,26 @@ export interface StorageStats {
   meetings: number;
   segments: number;
   artifacts: number;
-  database_bytes: number;
+  text_bytes: number;
   audio_bytes: number;
   total_bytes: number;
   oldest_meeting_at: string | null;
-  data_dir: string;
+  storage_dir: string;
+}
+
+export interface StorageInfo {
+  storage_dir: string;
+  default_storage_dir: string;
+  is_default: boolean;
+}
+
+export interface SpeakerHealth {
+  available: boolean;
+  enabled: boolean;
+  loaded: boolean;
+  backend: string | null;
+  installed: { speechbrain: boolean; resemblyzer: boolean };
+  install_hint: string;
 }
 
 export interface LlmHealth {
